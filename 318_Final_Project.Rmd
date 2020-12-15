@@ -1,0 +1,245 @@
+---
+title: "318_Final_Project"
+author: "Miranda Miao"
+date: "12/18/2020"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, echo=FALSE, warning=FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction and Handling Missing Variables
+
+```{r part1, include = FALSE, echo=FALSE, warning=FALSE, message = FALSE}
+library(readstata13)
+jarp <- read.dta13("/Users/mirandamiao/Dropbox/Thesis_Miao/Data/Output/jarp_nisei.dta")
+head(jarp)
+jarp <- jarp[, c("AGE","SEX","MARRIED","INTERNED", "PROPERTY_COMPEN", "PARENT_INC_DISCREET", "COLLEGE")]
+jarp$AGE_SQUARE <- jarp$AGE**2
+jarp$PARENT_INC_DISCREET[which(jarp$PARENT_INC_DISCREET==2500)]<- 1
+jarp$PARENT_INC_DISCREET[which(jarp$PARENT_INC_DISCREET==3750)]<- 1
+jarp$PARENT_INC_DISCREET[which(jarp$PARENT_INC_DISCREET==6250)]<- 2
+jarp$PARENT_INC_DISCREET[which(jarp$PARENT_INC_DISCREET==8750)]<- 2
+jarp$PARENT_INC_DISCREET[which(jarp$PARENT_INC_DISCREET==12500)]<- 3
+jarp$PARENT_INC_DISCREET[which(jarp$PARENT_INC_DISCREET==17500)]<- 3
+jarp$PARENT_INC_DISCREET[which(jarp$PARENT_INC_DISCREET==24500)]<- 4
+jarp$PARENT_INC_DISCREET[which(jarp$PARENT_INC_DISCREET==30000)]<- 4
+#Dealing with the missing variable
+jarp.clean <- jarp[-which(is.na(jarp$SEX) | is.na(jarp$AGE)|is.na(jarp$INTERNED) |is.na(jarp$MARRIED)|is.na(jarp$PROPERTY_COMPEN)|is.na(jarp$PARENT_INC_DISCREET)),]
+names(jarp.clean)[names(jarp.clean) == "PARENT_INC_DISCREET"] <- "PARENT_INC"
+jarp.clean$COLLEGE <-  factor(jarp.clean$COLLEGE)
+jarp.clean$PARENT_INC <- factor(jarp.clean$PARENT_INC)
+attach(jarp.clean)
+setwd("/Users/mirandamiao/Dropbox/STATS 318/Data")
+write.csv(data.frame(jarp.clean),"jarp_clean.csv", row.names = FALSE)
+#detach(jarp.clean)
+```
+
+
+## Model Selection Usin BIC, AIC, and AUC
+```{r part2, echo=TRUE, message=FALSE, warnings = FALSE}
+#the full model 
+model.full <- glm(COLLEGE~INTERNED+SEX+AGE+AGE_SQUARE+PROPERTY_COMPEN+MARRIED+PARENT_INC,
+                    family=binomial(link="logit"),
+                    data = jarp.clean)
+summary(model.full)
+
+#Use step-wise function AIC
+step(model.full, direction = "both", trace = 1, step = 1000, k = 2)
+model.AIC <- glm(COLLEGE ~ INTERNED + SEX + AGE_SQUARE + PROPERTY_COMPEN + MARRIED + PARENT_INC, 
+                    family=binomial(link="logit"),
+                    data = jarp.clean)
+
+#Use step-wise function BIC
+n = dim(jarp.clean)[1]
+step(model.full, direction = "both", trace = 1, step = 10, k = n)
+model.BIC <- glm( as.factor(COLLEGE) ~ 1, family = binomial(link = "logit"), data = jarp.clean)
+
+#use AUC Random Forest Method
+library(AUCRF)
+set.seed(223)
+model.AUC.full <- AUCRF(COLLEGE~AGE+INTERNED+MARRIED+SEX+PARENT_INC+PROPERTY_COMPEN+AGE_SQUARE, data = data.frame(jarp.clean), 
+                   k0 = 1, pdel = 0.2)
+model.AUC.full$Kopt
+OptimalSet(model.AUC.full)
+plot(model.AUC.full, wich="psel", maxvars=20)
+model.AUC <- glm(COLLEGE~AGE+SEX+PARENT_INC+MARRIED, family = binomial(link = "logit"), data = jarp.clean)
+```
+
+## Cross Validation to Choose the Model with Most Predictive Power
+```{r part3, echo=TRUE, message=FALSE, warnings = FALSE}
+
+####K FOLD VALIDATION####
+###K Fold Cross Validation for AIC Model
+#number of units in the data 
+n = dim(jarp.clean)[1]
+d = floor(n/5)
+set.seed(341342)
+#shuffle the data before I create subsets
+jarp.clean <- jarp.clean[sample(1:length(jarp.clean$COLLEGE), n, replace = FALSE),]
+subset <- rep(NA, length(jarp.clean$COLLEGE))
+#making the  5 subsets of the data
+subset[1:d] <- 1
+subset[(d+1):(2*d)] <- 2
+subset[(2*d+1):(3*d)] <- 3
+subset[(3*d+1):(4*d)] <- 4
+subset[(4*d+1):n] <- 5
+jarp.clean$SUBSET <- subset
+attach(jarp.clean)
+#run the for loop to calculate cross validate based on AUC Average for AIC
+library(pROC) 
+AUC.sum = 0 
+for (i in 1:5) {
+  model.AIC <- glm(COLLEGE ~ INTERNED + SEX + AGE_SQUARE + PROPERTY_COMPEN + MARRIED + PARENT_INC, 
+                   family = binomial(link = "logit"), 
+                  data = jarp.clean[-which(jarp.clean$SUBSET == i), ])
+  pi.hat <- predict(model.AIC, newdata = jarp.clean[which(jarp.clean$SUBSET == i),])
+  #accumulate AUC.sum to take the average later 
+  AUC.sum <- AUC.sum + auc(COLLEGE[which(jarp.clean$SUBSET == i)], pi.hat)
+  print(auc(COLLEGE[which(jarp.clean$SUBSET == i)], pi.hat))
+}
+
+AUC.average.AIC = AUC.sum/5
+AUC.average.AIC #0.721643
+
+
+###K Fold Validatin for AUC Model
+AUC.sum = 0 
+library("pROC") 
+for (i in 1:5) {
+  model.AUC <- glm(COLLEGE~ AGE+AGE_SQUARE+PARENT_INC, 
+                    family=binomial(link="logit"),
+                    data = jarp.clean[-which(jarp.clean$SUBSET == i),])
+
+  pi.hat <- predict(model.AUC, newdata = jarp.clean[which(jarp.clean$SUBSET == i), ])
+  #accumulate AUC.sum to take the average later 
+  AUC.sum <- AUC.sum + auc(COLLEGE[which(jarp.clean$SUBSET == i)], pi.hat)
+  print(auc(COLLEGE[which(jarp.clean$SUBSET == i)], pi.hat))
+}
+
+AUC.average.AUC = AUC.sum/5 
+AUC.average.AUC #0.7178166
+
+#assign the final model 
+glm.final <- glm(COLLEGE ~ INTERNED + SEX + AGE_SQUARE + PROPERTY_COMPEN + MARRIED + PARENT_INC, 
+                    family=binomial(link="logit"),
+                    data = jarp.clean)
+p.hat.final <- predict(glm.final,  type = "response")
+y.hat.final<- ifelse(p.hat.final >= 0.5, 1, 0)
+#create the AUC Curve for the final model
+library("pROC") 
+plot(roc(COLLEGE, p.hat.final)) #plot the curve 
+auc(COLLEGE, p.hat.final) # AUC =0.7258
+
+```
+
+##Chi Square Test For Model Fit
+```{r part4, echo=TRUE, message=FALSE, warnings = FALSE}
+#Likelihood Ratio test for Goodness of Fit
+summary(glm.final)
+1-pchisq(2335.5, df = 2205)
+```
+
+This means the model fit is sufficient. 
+
+## Regression Diagnostics 
+```{r part5, echo=TRUE, message=FALSE, warnings = FALSE}
+#the residual plots
+par(mfrow=c(2,2))
+plot(glm.final)
+#the outliers
+
+####Testing for influential outliers #####
+#the threshold for identify outliers
+quantile <- apply(dfbetas(glm.final),2, quantile)
+threshold <- rbind(quantile[2, ]-1.5*(quantile[4, ] - quantile[2, ]), quantile[4, ]+1.5*(quantile[4, ] - quantile[2, ]))
+rownames(threshold) <- c("Q1-1.5*IQR", "Q3+1.5*IQR")
+
+
+#775 due to INTERNED
+#803 due to AGE SQUARE and PARENT_IN4
+#1664 due to PARENT_INC4
+jarp.clean[c(1321, 1664, 803, 775, 1645), ]
+outliers <- dfbetas(glm.final)[c(1321, 1664, 803, 775, 1645), ]
+rownames(outliers)<- c(1321, 1664, 803, 775, 1664)
+outliers
+threshold
+
+#the influential points are 
+jarp.clean <- jarp.clean[-c(775, 803, 1645),]
+attach(jarp.clean)
+#fit the regression without the influential outlier
+jarp.clean.short <- jarp.clean[-c(727, 1372, 526),]
+glm.final.resid <- glm(COLLEGE~INTERNED + SEX + AGE_SQUARE + PROPERTY_COMPEN + MARRIED + PARENT_INC, 
+                    family=binomial(link="logit"),
+                    data = jarp.clean.short)
+par(mfrow=c(2,2))
+plot(glm.final.resid)
+summary(glm.final.resid)
+1-pchisq(2333.3  , df = 2202 )
+```
+
+##Improve Model By Comparing Nested Model
+```{r part6, echo=TRUE, message=FALSE, warnings = FALSE }
+glm.full <- glm(COLLEGE~INTERNED + SEX + AGE_SQUARE + PROPERTY_COMPEN + MARRIED + PARENT_INC, 
+                    family=binomial(link="logit"),
+                    data = jarp.clean)
+
+
+PARENT_INC2 <- rep(0, length(COLLEGE))
+PARENT_INC2[which(PARENT_INC==2)] <- 1
+
+PARENT_INC3 <- rep(0, length(COLLEGE))
+PARENT_INC3[which(PARENT_INC==3)] <- 1
+
+PARENT_INC4 <- rep(0, length(COLLEGE))
+PARENT_INC4[which(PARENT_INC==4)] <- 1
+
+glm.short <- glm(COLLEGE~INTERNED + SEX + AGE_SQUARE + PROPERTY_COMPEN + MARRIED + PARENT_INC3+PARENT_INC4, 
+                    family=binomial(link="logit"),
+                    data = jarp.clean)
+
+#Testing if PARENT_INC2 is significant or not, likelihood test for model comparison
+summary(glm.full)
+summary(glm.short)
+1-pchisq((2333.2-2333.1),1)
+
+glm.short2 <- glm(COLLEGE~INTERNED + SEX + AGE_SQUARE + MARRIED + PARENT_INC, 
+                    family=binomial(link="logit"),
+                    data = jarp.clean)
+
+#Testing if PROPERTY_COMPEN is significant or not, likelihood test for model comparison
+summary(glm.short2)
+1-pchisq((2335.8-2333.1),1)
+```
+
+
+## Model Interpretation
+```{r part7, echo=TRUE, message=FALSE, warnings = FALSE }
+
+glm.final.final <- glm(COLLEGE~INTERNED + SEX + AGE_SQUARE + MARRIED +  PARENT_INC3 + PARENT_INC4 +PROPERTY_COMPEN, 
+                    family=binomial(link="logit"),
+                    data = jarp.clean)
+summary(glm.final.final)
+
+1-pchisq(2333.2,2203)
+
+p.hat.final <- predict(glm.final.final,  type = "response")
+y.hat.final<- ifelse(p.hat.final >= 0.5, 1, 0)
+
+library("pROC") 
+plot(roc(COLLEGE, p.hat.final)) #plot the curve 
+auc(COLLEGE, p.hat.final) # AUC =0.7258
+
+p.hat.final <- predict(glm.final.final,  type = "response")
+y.hat.final<- ifelse(p.hat.final >= 0.5, 1, 0)
+
+library("pROC") 
+plot(roc(COLLEGE, p.hat.final)) #plot the curve 
+auc(COLLEGE, p.hat.final) # AUC =0.7258
+
+
+```
